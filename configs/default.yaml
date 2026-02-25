@@ -18,7 +18,7 @@ sampling:
   top_p: 0.95
   max_tokens: 3072
   n: 20
-  batch_size: 4
+  batch_size: 64
 
 scoring:
   model: "gpt-5-mini"

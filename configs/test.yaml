@@ -1,6 +1,6 @@
 models:
-  - id: "allenai/OLMo-3-32B-Think-SFT"
-    short_name: "Think-SFT"
+  - id: "allenai/OLMo-3.1-32B-Think"
+    short_name: "3.1-Think"
 
 steering:
   layers: [13, 18, 24, 29, 35, 40]
@@ -12,7 +12,7 @@ sampling:
   top_p: 0.95
   max_tokens: 3072
   n: 2
-  batch_size: 2
+  batch_size: 64
 
 scoring:
   model: "gpt-5-mini"
