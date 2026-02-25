@@ -39,13 +39,13 @@ def parse_args():
 def write_sbatch_script(model, config, config_path, prompts_path, log_dir, slurm_cfg):
     """Write a temporary sbatch script for one model. Returns the script path."""
     short_name = model["short_name"]
-    tp = slurm_cfg.get("num_gpus", 2)
+    num_gpus = slurm_cfg.get("num_gpus", 2)
     job_name = slurm_cfg.get("job_name", "steering")
     partition = slurm_cfg.get("partition", "compute")
     timeout = slurm_cfg.get("timeout", "12:00:00")
-    gpus_per_node = slurm_cfg.get("gpus_per_node", 8)
+    total_gpus_per_node = slurm_cfg.get("gpus_per_node", 8)
     cpus_per_node = slurm_cfg.get("cpus_per_node", 64)
-    cpus = cpus_per_node // gpus_per_node * tp
+    cpus = cpus_per_node // total_gpus_per_node * num_gpus
     scorer_limit = config["scoring"]["max_concurrent"] // slurm_cfg.get("max_concurrent", 2)
 
     slurm_log_dir = log_dir / "slurm_logs"
@@ -56,7 +56,7 @@ def write_sbatch_script(model, config, config_path, prompts_path, log_dir, slurm
     script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}_{short_name}
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node={tp}
+#SBATCH --gpus-per-node={num_gpus}
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --partition={partition}

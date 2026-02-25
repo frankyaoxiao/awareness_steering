@@ -85,15 +85,26 @@ async def score_one(client, sem, text, scoring_config, score_bar):
                         {"role": "user", "content": prompt}
                     ],
                 )
-                content = resp.choices[0].message.content.strip()
+                content = resp.choices[0].message.content
+                if content is None:
+                    print(f"  [scorer] attempt {attempt}: content is None (finish_reason={resp.choices[0].finish_reason})", flush=True)
+                    if attempt == 4:
+                        score_bar.update(1)
+                        return None
+                    await asyncio.sleep(2**attempt)
+                    continue
+                content = content.strip()
                 aware, reasoning, quote = parse_scorer_response(content)
                 if aware is not None:
                     score_bar.update(1)
                     return {"aware": aware, "reasoning": reasoning, "quote": quote}
+                # Invalid response — retry
+                print(f"  [scorer] attempt {attempt}: unparseable (finish_reason={resp.choices[0].finish_reason}, len={len(content)}): {content[:300]!r}", flush=True)
                 if attempt == 4:
                     score_bar.update(1)
                     return None
-            except Exception:
+            except Exception as e:
+                print(f"  [scorer] attempt {attempt}: exception: {e}", flush=True)
                 if attempt == 4:
                     score_bar.update(1)
                     return None
