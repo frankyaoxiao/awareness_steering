@@ -1,10 +1,4 @@
 models:
-  - id: "allenai/OLMo-3-32B-Think-SFT"
-    short_name: "Think-SFT"
-  - id: "allenai/OLMo-3-32B-Think-DPO"
-    short_name: "Think-DPO"
-  - id: "allenai/OLMo-3-32B-Think"
-    short_name: "Think"
   - id: "allenai/OLMo-3.1-32B-Think"
     short_name: "3.1-Think"
 
@@ -18,12 +12,12 @@ sampling:
   top_p: 0.95
   max_tokens: 3072
   n: 20
-  batch_size: 64
+  batch_size: 8
 
 scoring:
   model: "gpt-5-mini"
   reasoning_effort: "medium"
-  max_completion_tokens: 500
+  max_completion_tokens: 2048
   max_concurrent: 200
 
 slurm:
@@ -38,3 +32,4 @@ slurm:
 paths:
   prompts: "data/fortress/sampled_prompts.jsonl"
   vectors: "vectors/"
+  num_prompts: 50

@@ -44,13 +44,13 @@ def extract_vector(model_id, contrastive_prompts_path, vectors_dir):
     )
     model.eval()
 
-    # Format all prompts with chat template
+    # Format all prompts with chat template (NO generation prompt, matching paper)
     all_texts = []
     for prompt in deploy_prompts + eval_prompts:
         text = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=False,
         )
         all_texts.append(text)
 
@@ -61,6 +61,28 @@ def extract_vector(model_id, contrastive_prompts_path, vectors_dir):
     inputs = tokenizer(all_texts, return_tensors="pt", padding=True)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
+    # Find colon token position for each sequence (paper: "at the colon token position")
+    # All contrastive prompts end with ":", which after chat template becomes ":<|im_end|>\n"
+    # With left-padding, the last non-pad token is always at seq_len - 1
+    colon_token_id = tokenizer.encode(":", add_special_tokens=False)[-1]
+    seq_len = inputs["input_ids"].shape[1]
+
+    # Search backwards from end of each sequence to find the colon
+    colon_positions = []
+    for i in range(inputs["input_ids"].shape[0]):
+        seq = inputs["input_ids"][i]
+        found = False
+        for pos in range(seq_len - 1, max(seq_len - 10, -1), -1):
+            if seq[pos].item() == colon_token_id:
+                colon_positions.append(pos)
+                found = True
+                break
+        if not found:
+            print(f"  WARNING: No colon found for prompt {i}, using seq_len-3")
+            colon_positions.append(seq_len - 3)
+    colon_positions = torch.tensor(colon_positions, device=inputs["input_ids"].device)
+    print(f"  Colon positions (offset from end): {(seq_len - 1 - colon_positions).tolist()}")
+
     print(f"Running forward pass ({len(all_texts)} prompts, seq_len={inputs['input_ids'].shape[1]})...")
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
@@ -69,17 +91,13 @@ def extract_vector(model_id, contrastive_prompts_path, vectors_dir):
     # Index 0 = embedding output, 1..num_layers = layer outputs
     hidden_states = outputs.hidden_states
 
-    # Find last non-pad token position for each sequence
-    attention_mask = inputs["attention_mask"]
-    last_positions = attention_mask.sum(dim=1) - 1  # (batch,)
-
     # Compute per-layer mean difference
     steering_vectors = []
     for layer_idx in range(1, len(hidden_states)):  # skip embedding
         hs = hidden_states[layer_idx]  # (batch, seq_len, hidden_size)
 
-        # Extract activation at last non-pad token for each prompt
-        acts = hs[torch.arange(hs.size(0), device=hs.device), last_positions]  # (batch, hidden)
+        # Extract activation at the colon token position for each prompt
+        acts = hs[torch.arange(hs.size(0), device=hs.device), colon_positions]  # (batch, hidden)
 
         deploy_mean = acts[:n_deploy].float().mean(dim=0)
         eval_mean = acts[n_deploy:].float().mean(dim=0)

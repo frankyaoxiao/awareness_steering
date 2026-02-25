@@ -178,7 +178,8 @@ def generate_on_gpu(rank, model_id, tokenizer, prompts, sampling_config,
 
     print(f"  [GPU {rank}] Loading model ({len(prompts)} prompts)...")
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map={"": device}, dtype=torch.bfloat16
+        model_id, device_map={"": device}, dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
     )
     model.eval()
 
@@ -245,16 +246,31 @@ def generate_on_gpu(rank, model_id, tokenizer, prompts, sampling_config,
 # ---------------------------------------------------------------------------
 
 
+def deep_merge(base, override):
+    """Deep merge override dict into base dict."""
+    for k, v in override.items():
+        if isinstance(v, dict) and k in base and isinstance(base[k], dict):
+            deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+
 async def main():
     mp.set_start_method("spawn", force=True)
 
-    # Args: model_json, config_path, prompts_path, log_dir
+    # Args: model_json, config_path, prompts_path, log_dir [--override JSON]
     model_spec = json.loads(sys.argv[1])
     with open(sys.argv[2]) as f:
         config = yaml.safe_load(f)
     with open(sys.argv[3]) as f:
         prompts = [json.loads(line) for line in f]
     log_dir = Path(sys.argv[4])
+
+    # Apply overrides if provided
+    if "--override" in sys.argv:
+        idx = sys.argv.index("--override")
+        override = json.loads(sys.argv[idx + 1])
+        deep_merge(config, override)
 
     model_id = model_spec["id"]
     short_name = model_spec["short_name"]
