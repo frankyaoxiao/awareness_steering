@@ -11,6 +11,7 @@ dependencies = [
     "python-dotenv",
     "tqdm",
     "flash-attn",
+    "matplotlib>=3.10.8",
 ]
 
 [tool.uv.extra-build-dependencies]
