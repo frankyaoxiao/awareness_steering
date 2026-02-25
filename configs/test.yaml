@@ -1,0 +1,35 @@
+models:
+  - id: "allenai/OLMo-3-32B-Think-SFT"
+    short_name: "Think-SFT"
+
+steering:
+  layers: [13, 18, 24, 29, 35, 40]
+  strength: 0.6
+  contrastive_prompts: "data/contrastive_prompts.json"
+
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 3072
+  n: 2
+  batch_size: 2
+
+scoring:
+  model: "gpt-5-mini"
+  reasoning_effort: "medium"
+  max_completion_tokens: 500
+  max_concurrent: 50
+
+slurm:
+  partition: "compute"
+  max_concurrent: 1
+  timeout: "2:00:00"
+  job_name: "steer-test"
+  gpus_per_node: 8
+  cpus_per_node: 64
+  tensor_parallel_size: 4
+
+paths:
+  prompts: "data/fortress/sampled_prompts.jsonl"
+  vectors: "vectors/"
+  num_prompts: 2

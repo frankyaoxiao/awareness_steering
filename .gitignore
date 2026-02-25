@@ -1,1 +1,7 @@
 .env
+runs/
+vectors/
+__pycache__/
+*.pdf
+.venv/
+uv.lock
