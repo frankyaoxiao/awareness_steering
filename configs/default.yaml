@@ -33,7 +33,7 @@ slurm:
   job_name: "steering"
   gpus_per_node: 8
   cpus_per_node: 64
-  tensor_parallel_size: 4
+  num_gpus: 2
 
 paths:
   prompts: "data/fortress/sampled_prompts.jsonl"

@@ -1,14 +1,20 @@
 #!/usr/bin/env python
-"""Worker: generate completions (baseline + steered) for one model and score with GPT-5-mini."""
+"""Worker: generate completions (baseline + steered) for one model and score with GPT-5-mini.
+
+Splits prompts across available GPUs for data-parallel generation — each GPU loads
+its own copy of the model and handles a shard of prompts independently.
+"""
 
 import asyncio
 import json
 import os
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import torch
+import torch.multiprocessing as mp
 import yaml
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -145,61 +151,82 @@ def remove_hooks(hooks):
 
 
 # ---------------------------------------------------------------------------
-# Generation
+# Generation (single GPU)
 # ---------------------------------------------------------------------------
 
 
-def generate_completions(model, tokenizer, prompts, sampling_config, desc="Generating"):
-    """Generate n completions per prompt using model.generate(). Returns list of (prompt_id, idx, text)."""
+def generate_on_gpu(rank, model_id, tokenizer, prompts, sampling_config,
+                    steering_vector, steering_config):
+    """Generate baseline + steered completions for a shard of prompts on one GPU.
+
+    Called in a subprocess — loads its own model copy on the assigned GPU.
+    Returns (baseline_results, steered_results).
+    """
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    print(f"  [GPU {rank}] Loading model ({len(prompts)} prompts)...")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, device_map={"": device}, dtype=torch.bfloat16
+    )
+    model.eval()
+
     n_samples = sampling_config["n"]
     batch_size = sampling_config["batch_size"]
     max_tokens = sampling_config["max_tokens"]
     temperature = sampling_config["temperature"]
     top_p = sampling_config["top_p"]
 
-    total = len(prompts) * n_samples
-    bar = tqdm(total=total, desc=desc, unit="comp")
+    def run_generation(desc):
+        results = []
+        bar = tqdm(total=len(prompts) * n_samples, desc=f"  [GPU {rank}] {desc}", unit="comp")
+        for p in prompts:
+            formatted = tokenizer.apply_chat_template(
+                [{"role": "user", "content": p["prompt"]}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for batch_start in range(0, n_samples, batch_size):
+                batch_n = min(batch_size, n_samples - batch_start)
+                inputs = tokenizer(
+                    [formatted] * batch_n, return_tensors="pt", padding=True,
+                ).to(device)
+                input_len = inputs["input_ids"].shape[1]
 
-    results = []
-    for p in prompts:
-        prompt_id = p["id"]
-        formatted = tokenizer.apply_chat_template(
-            [{"role": "user", "content": p["prompt"]}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=True,
+                    )
+                for i in range(batch_n):
+                    text = tokenizer.decode(output_ids[i][input_len:], skip_special_tokens=True)
+                    results.append({
+                        "prompt_id": p["id"],
+                        "completion_idx": batch_start + i,
+                        "text": text,
+                    })
+                    bar.update(1)
+        bar.close()
+        return results
 
-        # Generate n_samples in batches
-        for batch_start in range(0, n_samples, batch_size):
-            batch_n = min(batch_size, n_samples - batch_start)
+    # Baseline
+    baseline = run_generation("Baseline")
 
-            inputs = tokenizer(
-                [formatted] * batch_n,
-                return_tensors="pt",
-                padding=True,
-            ).to(model.device)
-            input_len = inputs["input_ids"].shape[1]
+    # Steered
+    hooks = register_steering_hooks(
+        model, steering_vector,
+        steering_config["layers"],
+        steering_config["strength"],
+    )
+    steered = run_generation("Steered")
+    remove_hooks(hooks)
 
-            with torch.no_grad():
-                output_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=True,
-                )
-
-            for i in range(batch_n):
-                text = tokenizer.decode(
-                    output_ids[i][input_len:],
-                    skip_special_tokens=True,
-                )
-                comp_idx = batch_start + i
-                results.append({"prompt_id": prompt_id, "completion_idx": comp_idx, "text": text})
-                bar.update(1)
-
-    bar.close()
-    return results
+    del model
+    torch.cuda.empty_cache()
+    return baseline, steered
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +235,8 @@ def generate_completions(model, tokenizer, prompts, sampling_config, desc="Gener
 
 
 async def main():
+    mp.set_start_method("spawn", force=True)
+
     # Args: model_json, config_path, prompts_path, log_dir
     model_spec = json.loads(sys.argv[1])
     with open(sys.argv[2]) as f:
@@ -229,52 +258,59 @@ async def main():
     if num_prompts:
         prompts = prompts[:num_prompts]
 
+    n_gpus = torch.cuda.device_count()
     n_prompts = len(prompts)
     n_completions = n_prompts * sc["n"]
 
     print(f"{prefix} Model: {model_id}")
     print(f"{prefix} Prompts: {n_prompts}, Samples/prompt: {sc['n']}, Total: {n_completions}")
+    print(f"{prefix} GPUs: {n_gpus} (data-parallel)")
 
-    # --- Phase 1: Load model + steering vector ---
-    print(f"{prefix} Loading model...")
+    # Load tokenizer + steering vector in main process
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, device_map="auto", dtype=torch.bfloat16
-    )
-    model.eval()
 
     vector_path = vectors_dir / f"{short_name}.pt"
     print(f"{prefix} Loading steering vector from {vector_path}...")
     steering_vector = torch.load(vector_path, weights_only=True)
 
-    # --- Phase 2a: Generate baseline completions ---
-    print(f"{prefix} Generating baseline completions...")
-    baseline_comps = generate_completions(model, tokenizer, prompts, sc, desc=f"{prefix} Baseline")
+    # --- Phase 1: Generate completions (data-parallel across GPUs) ---
+    # Shard prompts across GPUs
+    shards = [prompts[i::n_gpus] for i in range(n_gpus)]
+
+    print(f"{prefix} Generating on {n_gpus} GPU(s)...")
+    loop = asyncio.get_event_loop()
+    with ProcessPoolExecutor(max_workers=n_gpus, mp_context=mp.get_context("spawn")) as pool:
+        futures = [
+            loop.run_in_executor(
+                pool,
+                generate_on_gpu,
+                rank, model_id, tokenizer, shards[rank], sc,
+                steering_vector, steering_config,
+            )
+            for rank in range(n_gpus)
+        ]
+        shard_results = await asyncio.gather(*futures)
+
+    # Merge results from all GPUs
+    baseline_comps = []
+    steered_comps = []
+    for baseline_shard, steered_shard in shard_results:
+        baseline_comps.extend(baseline_shard)
+        steered_comps.extend(steered_shard)
+
+    # Sort by prompt_id for consistent output
+    baseline_comps.sort(key=lambda x: (x["prompt_id"], x["completion_idx"]))
+    steered_comps.sort(key=lambda x: (x["prompt_id"], x["completion_idx"]))
+
     comp_path = log_dir / "completions" / f"{short_name}.jsonl"
-    atomic_write_jsonl(comp_path, baseline_comps)
-    print(f"{prefix} Saved baseline: {comp_path}")
-
-    # --- Phase 2b: Generate steered completions ---
-    print(f"{prefix} Registering steering hooks...")
-    hooks = register_steering_hooks(
-        model, steering_vector,
-        steering_config["layers"],
-        steering_config["strength"],
-    )
-    print(f"{prefix} Generating steered completions...")
-    steered_comps = generate_completions(model, tokenizer, prompts, sc, desc=f"{prefix} Steered")
-    remove_hooks(hooks)
     steered_path = log_dir / "completions" / f"{short_name}_steered.jsonl"
+    atomic_write_jsonl(comp_path, baseline_comps)
     atomic_write_jsonl(steered_path, steered_comps)
-    print(f"{prefix} Saved steered: {steered_path}")
+    print(f"{prefix} Saved completions: {comp_path}, {steered_path}")
 
-    # --- Free GPU memory ---
-    del model
-    torch.cuda.empty_cache()
-
-    # --- Phase 3: Score all completions ---
+    # --- Phase 2: Score all completions ---
     scorer = AsyncOpenAI()
     max_concurrent = int(os.environ.get("SCORER_MAX_CONCURRENT", scoring_config["max_concurrent"]))
     sem = asyncio.Semaphore(max_concurrent)

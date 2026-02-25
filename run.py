@@ -39,7 +39,7 @@ def parse_args():
 def write_sbatch_script(model, config, config_path, prompts_path, log_dir, slurm_cfg):
     """Write a temporary sbatch script for one model. Returns the script path."""
     short_name = model["short_name"]
-    tp = slurm_cfg.get("tensor_parallel_size", 4)
+    tp = slurm_cfg.get("num_gpus", 2)
     job_name = slurm_cfg.get("job_name", "steering")
     partition = slurm_cfg.get("partition", "compute")
     timeout = slurm_cfg.get("timeout", "12:00:00")
