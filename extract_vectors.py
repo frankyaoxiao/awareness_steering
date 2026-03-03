@@ -25,7 +25,7 @@ REPO_DIR = Path(__file__).parent.resolve()
 # ---------------------------------------------------------------------------
 
 
-def extract_vector(model_id, contrastive_prompts_path, vectors_dir):
+def extract_vector(model_id, contrastive_prompts_path, vectors_dir, chat_template_from=None):
     """Load model, run contrastive prompts, compute mean diff per layer."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -39,6 +39,10 @@ def extract_vector(model_id, contrastive_prompts_path, vectors_dir):
 
     print(f"Loading model {model_id}...")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if chat_template_from:
+        print(f"  Borrowing chat template from {chat_template_from}")
+        donor_tok = AutoTokenizer.from_pretrained(chat_template_from)
+        tokenizer.chat_template = donor_tok.chat_template
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto", dtype=torch.bfloat16
     )
@@ -126,8 +130,9 @@ def worker_main(args):
     output_path = vectors_dir / f"{short_name}.pt"
 
     contrastive_prompts_path = Path(config["steering"]["contrastive_prompts"])
+    chat_template_from = model.get("chat_template_from")
 
-    vector = extract_vector(model_id, contrastive_prompts_path, vectors_dir)
+    vector = extract_vector(model_id, contrastive_prompts_path, vectors_dir, chat_template_from=chat_template_from)
     torch.save(vector, output_path)
     print(f"Saved: {output_path} (shape {vector.shape})")
 
