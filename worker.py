@@ -167,7 +167,7 @@ def remove_hooks(hooks):
 
 
 def generate_on_gpu(rank, model_id, tokenizer, prompts, sampling_config,
-                    steering_vector, steering_config):
+                    steering_vector, steering_config, steered_only=False):
     """Generate baseline + steered completions for a shard of prompts on one GPU.
 
     Called in a subprocess — loads its own model copy on the assigned GPU.
@@ -225,7 +225,7 @@ def generate_on_gpu(rank, model_id, tokenizer, prompts, sampling_config,
         return results
 
     # Baseline
-    baseline = run_generation("Baseline")
+    baseline = [] if steered_only else run_generation("Baseline")
 
     # Steered
     hooks = register_steering_hooks(
@@ -272,6 +272,7 @@ async def main():
         override = json.loads(sys.argv[idx + 1])
         deep_merge(config, override)
 
+    steered_only = "--steered-only" in sys.argv
     model_id = model_spec["id"]
     short_name = model_spec["short_name"]
     sc = config["sampling"]
@@ -314,7 +315,7 @@ async def main():
                 pool,
                 generate_on_gpu,
                 rank, model_id, tokenizer, shards[rank], sc,
-                steering_vector, steering_config,
+                steering_vector, steering_config, steered_only,
             )
             for rank in range(n_gpus)
         ]
@@ -331,18 +332,21 @@ async def main():
     baseline_comps.sort(key=lambda x: (x["prompt_id"], x["completion_idx"]))
     steered_comps.sort(key=lambda x: (x["prompt_id"], x["completion_idx"]))
 
-    comp_path = log_dir / "completions" / f"{short_name}.jsonl"
     steered_path = log_dir / "completions" / f"{short_name}_steered.jsonl"
-    atomic_write_jsonl(comp_path, baseline_comps)
     atomic_write_jsonl(steered_path, steered_comps)
-    print(f"{prefix} Saved completions: {comp_path}, {steered_path}")
+    if not steered_only:
+        comp_path = log_dir / "completions" / f"{short_name}.jsonl"
+        atomic_write_jsonl(comp_path, baseline_comps)
+    print(f"{prefix} Saved completions ({len(baseline_comps)} baseline, {len(steered_comps)} steered)")
 
     # --- Phase 2: Score all completions ---
     scorer = AsyncOpenAI()
     max_concurrent = int(os.environ.get("SCORER_MAX_CONCURRENT", scoring_config["max_concurrent"]))
     sem = asyncio.Semaphore(max_concurrent)
 
-    all_comps = [("baseline", baseline_comps), ("steered", steered_comps)]
+    all_comps = [("steered", steered_comps)]
+    if not steered_only:
+        all_comps.insert(0, ("baseline", baseline_comps))
     total_to_score = sum(len(c) for _, c in all_comps)
     score_bar = tqdm(total=total_to_score, desc=f"{prefix} Scoring", unit="comp")
 
@@ -369,19 +373,20 @@ async def main():
         target = baseline_scores if condition == "baseline" else steered_scores
         target.append(row)
 
-    score_path_base = log_dir / "scores" / f"{short_name}.jsonl"
     score_path_steer = log_dir / "scores" / f"{short_name}_steered.jsonl"
-    atomic_write_jsonl(score_path_base, baseline_scores)
     atomic_write_jsonl(score_path_steer, steered_scores)
+    if not steered_only:
+        score_path_base = log_dir / "scores" / f"{short_name}.jsonl"
+        atomic_write_jsonl(score_path_base, baseline_scores)
 
     # --- Summary ---
     for label, scores in [("baseline", baseline_scores), ("steered", steered_scores)]:
+        if not scores:
+            continue
         aware_count = sum(1 for s in scores if s.get("aware") is True)
         valid_count = sum(1 for s in scores if s.get("aware") is not None)
         rate = aware_count / valid_count if valid_count > 0 else 0
         print(f"{prefix} {label}: awareness {rate:.2%} ({aware_count}/{valid_count})")
-
-    print(f"{prefix} Saved: {score_path_base}, {score_path_steer}")
 
 
 if __name__ == "__main__":
